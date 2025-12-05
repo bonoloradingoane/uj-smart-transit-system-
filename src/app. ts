@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, computed, signal, OnInit, AfterViewInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, signal, OnInit, AfterViewInit, inject } from '@angular/core';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, Auth } from 'firebase/auth';
+import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, Firestore, Unsubscribe } from 'firebase/firestore';
+
+// --- Global Variable Declarations (Mandatory for Canvas Environment) ---
+// Note: These variables are provided by the surrounding environment.
+declare const __firebase_config: string;
+declare const __app_id: string;
+declare const __initial_auth_token: string | undefined;
 
 // Declare google so TypeScript knows it exists (used by the external Google Maps library)
 declare const google: any;
@@ -10,9 +19,17 @@ interface RouteSchedule {
   destination: string;
   departureTime: string;
   arrivalEstimate: string;
-  // New: Mock coordinates for the bus's current location
   currentLat: number; 
   currentLng: number;
+}
+
+// 2. Define the data structure for a user's booking (Stored in Firestore)
+interface UserBooking {
+  id: string; // Document ID (will be a combination of route and time)
+  route: string;
+  departureTime: string;
+  queuePosition: number; // Stored position for demonstration
+  timestamp: number; // For sorting and freshness
 }
 
 @Component({
@@ -28,9 +45,48 @@ interface RouteSchedule {
           UJ Smart Transit System
         </h1>
         <p class="text-gray-500 mt-1">
-          Phase 2: Schedule Viewer and Real-Time Tracking UI
+          Phase 4: Data Persistence with Firestore
         </p>
       </header>
+
+      <!-- User ID Display (Crucial for multi-user apps) -->
+      <div class="mb-6 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 break-words">
+        <span class="font-bold">User ID:</span> {{ userId() ? userId() : 'Authenticating...' }} 
+        <span *ngIf="isAuthReady()" class="ml-2 text-green-600">(Connected)</span>
+      </div>
+
+      <!-- User Status / Virtual Queue Section -->
+      <section class="mb-8 p-6 bg-yellow-50 rounded-xl shadow-md border-l-4 border-yellow-500">
+        <h2 class="text-xl font-bold text-yellow-800 mb-3 flex items-center">
+          <svg class="w-6 h-6 mr-2 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          Your Virtual Queue Status
+        </h2>
+
+        @if (isLoading()) {
+          <p class="text-gray-500 italic">Loading booking status from Firestore...</p>
+        } @else if (userBooking()) {
+          <!-- Display Active Booking -->
+          <div class="p-4 bg-white rounded-lg shadow-inner flex justify-between items-center flex-wrap">
+            <div>
+              <p class="text-lg font-bold text-green-700">{{ userBooking()!.route }}</p>
+              <p class="text-sm text-gray-600">Departure: {{ userBooking()!.departureTime }}</p>
+            </div>
+            <div class="text-right mt-2 sm:mt-0">
+              <span class="text-4xl font-extrabold text-red-600">{{ userBooking()!.queuePosition }}</span>
+              <span class="block text-sm text-red-500">in Queue</span>
+              <button 
+                (click)="cancelBooking()" 
+                class="mt-2 text-sm bg-red-500 hover:bg-red-600 text-white py-1 px-3 rounded-full transition duration-150 shadow-md"
+              >
+                Cancel Booking
+              </button>
+            </div>
+          </div>
+        } @else {
+          <!-- No Active Booking -->
+          <p class="text-gray-600">You do not have an active booking. Select a schedule below to join the queue!</p>
+        }
+      </section>
 
       <!-- Main Content Area: Map and Schedule side-by-side on desktop -->
       <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -42,14 +98,13 @@ interface RouteSchedule {
           </h2>
           <!-- Map Container -->
           <div id="map" class="w-full h-full rounded-lg bg-gray-200">
-            <!-- Loading indicator/Placeholder -->
             <div *ngIf="!isMapLoaded()" class="flex items-center justify-center h-full text-gray-500">
               Loading Google Map... (Requires internet connection)
             </div>
           </div>
         </div>
 
-        <!-- Right Column: Schedule Viewer (Takes 1/3 width on large screens) -->
+        <!-- Right Column: Schedule and Booking Form -->
         <div class="lg:col-span-1 bg-white p-6 rounded-xl shadow-2xl">
           <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
             Campus Route Schedules
@@ -66,7 +121,6 @@ interface RouteSchedule {
               class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-lg shadow-md transition duration-150 ease-in-out hover:border-blue-500"
             >
               <option value="All">All Routes</option>
-              <!-- Loop through the unique routes -->
               @for (route of availableRoutes(); track route) {
                 <option [value]="route">{{ route }}</option>
               }
@@ -80,15 +134,26 @@ interface RouteSchedule {
                 <tr>
                   <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Route</th>
                   <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Dep.</th>
-                  <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Arr.</th>
+                  <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Book</th>
                 </tr>
               </thead>
               <tbody class="bg-white divide-y divide-gray-100">
                 @for (item of filteredSchedule(); track item.departureTime) {
-                  <tr class="hover:bg-blue-50 transition duration-100 cursor-pointer" (click)="zoomToBus(item)">
-                    <td class="px-2 py-2 font-semibold text-gray-900">{{ item.route | slice:0:10 }}...</td>
+                  <tr class="hover:bg-blue-50 transition duration-100">
+                    <td class="px-2 py-2 font-semibold text-gray-900 cursor-pointer" (click)="zoomToBus(item)">
+                      {{ item.route | slice:0:10 }}... 
+                    </td>
                     <td class="px-2 py-2 text-red-600 font-mono">{{ item.departureTime }}</td>
-                    <td class="px-2 py-2 text-green-600 font-mono">{{ item.arrivalEstimate }}</td>
+                    <td class="px-2 py-2">
+                      <button 
+                        (click)="bookQueueSpot(item)" 
+                        [disabled]="userBooking() !== null || !isAuthReady()"
+                        class="bg-green-500 text-white text-xs font-semibold py-1 px-2 rounded-full hover:bg-green-600 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                        title="{{ !isAuthReady() ? 'Authenticating...' : (userBooking() ? 'Already booked' : 'Book a spot') }}"
+                      >
+                        Queue
+                      </button>
+                    </td>
                   </tr>
                 } @empty {
                   <tr>
@@ -98,13 +163,13 @@ interface RouteSchedule {
               </tbody>
             </table>
           </div>
-          <p class="mt-4 text-xs text-gray-500 italic">Click a schedule row to focus the map on that bus's location.</p>
+          <p class="mt-4 text-xs text-gray-500 italic">Click the Queue button to reserve a spot for your selected trip.</p>
         </div>
       </main>
 
       <!-- Footer Section -->
       <footer class="mt-8 text-center text-sm text-gray-400">
-        <p>UJ Smart Transit System | Angular & Google Maps Demo</p>
+        <p>UJ Smart Transit System | Angular & Firestore Demo</p>
       </footer>
     </div>
   `,
@@ -117,32 +182,37 @@ interface RouteSchedule {
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class App implements OnInit, AfterViewInit {
-  // --- CORE STATE ---
-  private allSchedule = signal<RouteSchedule[]>([
-    // MOCK DATA with coordinates near UJ (Johannesburg, South Africa)
-    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '06:00', arrivalEstimate: '06:30', currentLat: -26.1825, currentLng: 28.0050 }, // Near APB
-    { route: 'DFC to APK Express', source: 'DFC', destination: 'APK', departureTime: '06:45', arrivalEstimate: '07:10', currentLat: -26.1950, currentLng: 28.0100 }, // Between DFC and APK
-    { route: 'SWC Commuter', source: 'SWC', destination: 'DFC', departureTime: '07:00', arrivalEstimate: '08:00', currentLat: -26.2200, currentLng: 27.9000 }, // Moving toward Soweto
-    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '07:30', arrivalEstimate: '08:00', currentLat: -26.1800, currentLng: 28.0150 }, // Near DFC
-    { route: 'APK to DFC Express', source: 'APK', destination: 'DFC', departureTime: '08:00', arrivalEstimate: '08:25', currentLat: -26.1700, currentLng: 28.0250 }, // Near APK
-    { route: 'SWC Commuter', source: 'DFC', destination: 'SWC', departureTime: '08:45', arrivalEstimate: '09:45', currentLat: -26.2100, currentLng: 27.9500 }, // Moving away from DFC
-  ]);
-  
-  private selectedRoute = signal<string>('All');
-  isMapLoaded = signal(false);
+  // --- FIREBASE SERVICE HANDLES ---
+  private db!: Firestore;
+  private auth!: Auth;
+  private unsubscribeBooking: Unsubscribe | null = null;
+  private APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-  // --- MAP VARIABLES ---
-  private map: any;
-  private markers: any[] = [];
+  // --- STATE SIGNALS ---
+  userId = signal<string | null>(null);
+  isAuthReady = signal(false);
+  isLoading = signal(true);
+  isMapLoaded = signal(false);
   
-  // --- COMPUTED STATE (Derived Data) ---
+  // NEW STATE: User's active booking loaded from Firestore
+  userBooking = signal<UserBooking | null>(null);
+  private selectedRoute = signal<string>('All');
+
+  // --- MOCK SCHEDULE DATA ---
+  private allSchedule = signal<RouteSchedule[]>([
+    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '06:00', arrivalEstimate: '06:30', currentLat: -26.1825, currentLng: 28.0050 },
+    { route: 'DFC to APK Express', source: 'DFC', destination: 'APK', departureTime: '06:45', arrivalEstimate: '07:10', currentLat: -26.1950, currentLng: 28.0100 },
+    { route: 'SWC Commuter', source: 'SWC', destination: 'DFC', departureTime: '07:00', arrivalEstimate: '08:00', currentLat: -26.2200, currentLng: 27.9000 },
+    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '07:30', arrivalEstimate: '08:00', currentLat: -26.1800, currentLng: 28.0150 },
+    { route: 'APK to DFC Express', source: 'APK', destination: 'DFC', departureTime: '08:00', arrivalEstimate: '08:25', currentLat: -26.1700, currentLng: 28.0250 },
+    { route: 'SWC Commuter', source: 'DFC', destination: 'SWC', departureTime: '08:45', arrivalEstimate: '09:45', currentLat: -26.2100, lng: 27.9500 },
+  ]);
+
+  // --- COMPUTED STATE ---
   filteredSchedule = computed(() => {
     const filter = this.selectedRoute();
     const data = this.allSchedule();
-
-    if (filter === 'All') {
-      return data;
-    }
+    if (filter === 'All') return data;
     return data.filter(item => item.route === filter);
   });
 
@@ -155,18 +225,96 @@ export class App implements OnInit, AfterViewInit {
   // --- LIFECYCLE HOOKS ---
   
   ngOnInit() {
-    console.log("App starting up. Preparing Google Maps integration...");
+    this.initializeFirebase();
   }
 
   ngAfterViewInit() {
-    // We must load the Google Maps script after the component view is initialized
     this.loadGoogleMapsScript();
   }
+  
+  // --- FIREBASE METHODS ---
 
-  // --- MAP METHODS ---
+  private initializeFirebase() {
+    try {
+      const firebaseConfig = JSON.parse(__firebase_config);
+      const app = initializeApp(firebaseConfig);
+      this.db = getFirestore(app);
+      this.auth = getAuth(app);
+      
+      this.handleAuthentication();
+    } catch (error) {
+      console.error("Firebase initialization failed:", error);
+    }
+  }
+
+  private async handleAuthentication() {
+    try {
+      if (typeof __initial_auth_token !== 'undefined') {
+        await signInWithCustomToken(this.auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(this.auth);
+      }
+    } catch (error) {
+      console.error("Authentication failed, signing in anonymously as fallback:", error);
+      await signInAnonymously(this.auth);
+    }
+
+    // Listener runs once auth state is determined
+    onAuthStateChanged(this.auth, (user) => {
+      if (user) {
+        this.userId.set(user.uid);
+        this.isAuthReady.set(true);
+        this.startBookingListener();
+      } else {
+        this.userId.set(null);
+        this.isAuthReady.set(true);
+        this.isLoading.set(false);
+      }
+    });
+  }
+
+  private getBookingDocPath(docId: string) {
+    const uid = this.userId();
+    if (!uid) {
+      console.error("User ID not available.");
+      return null;
+    }
+    // Secure path for private user data: /artifacts/{appId}/users/{userId}/bookings/{docId}
+    return doc(this.db, `artifacts/${this.APP_ID}/users/${uid}/bookings`, docId);
+  }
+
+  private startBookingListener() {
+    const uid = this.userId();
+    if (!uid) return;
+
+    // We only expect one booking per user, so we listen to a specific document path
+    // For simplicity, we assume the document ID is always 'active_booking'
+    const bookingRef = this.getBookingDocPath('active_booking');
+    if (!bookingRef) return;
+
+    if (this.unsubscribeBooking) {
+      this.unsubscribeBooking();
+    }
+    
+    this.unsubscribeBooking = onSnapshot(bookingRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as UserBooking;
+        this.userBooking.set({ ...data, id: docSnap.id });
+        console.log("Real-time booking updated:", data);
+      } else {
+        this.userBooking.set(null);
+        console.log("No active booking found.");
+      }
+      this.isLoading.set(false);
+    }, (error) => {
+      console.error("Error listening to booking:", error);
+      this.isLoading.set(false);
+    });
+  }
+
+  // --- MAP METHODS (UNMODIFIED) ---
 
   private loadGoogleMapsScript() {
-    // Check if the script is already loaded
     if (document.querySelector('#google-maps-script')) {
       this.initMap();
       return;
@@ -174,12 +322,10 @@ export class App implements OnInit, AfterViewInit {
 
     const script = document.createElement('script');
     script.id = 'google-maps-script';
-    // NOTE: This loads the Google Maps library needed for the tracking feature
     script.src = `https://maps.googleapis.com/maps/api/js?callback=initMapPlaceholder`;
     script.async = true;
     script.defer = true;
     
-    // Attach the callback function to the window object for Google Maps to call
     (window as any).initMapPlaceholder = () => this.initMap();
 
     document.head.appendChild(script);
@@ -188,22 +334,19 @@ export class App implements OnInit, AfterViewInit {
   private initMap() {
     this.isMapLoaded.set(true);
     const mapElement = document.getElementById('map');
-    
-    // Coordinates centered roughly on Johannesburg/UJ Campuses
     const centerPoint = { lat: -26.1952, lng: 28.0435 }; 
 
     this.map = new google.maps.Map(mapElement, {
       center: centerPoint,
       zoom: 12,
       mapTypeId: 'roadmap',
-      disableDefaultUI: true, // Keep it clean for the transit app
+      disableDefaultUI: true,
     });
 
     this.addBusMarkers(this.allSchedule());
   }
 
   private addBusMarkers(schedule: RouteSchedule[]) {
-    // Clear old markers first
     this.markers.forEach(marker => marker.setMap(null));
     this.markers = [];
 
@@ -215,12 +358,11 @@ export class App implements OnInit, AfterViewInit {
         map: this.map,
         title: bus.route,
         icon: {
-          url: iconBase + 'bus.png', // Standard bus icon
+          url: iconBase + 'bus.png',
           scaledSize: new google.maps.Size(32, 32),
         },
       });
 
-      // Add a simple InfoWindow when the bus marker is clicked
       const infoWindow = new google.maps.InfoWindow({
         content: `<div class="font-sans">
                     <p class="font-bold text-blue-800">${bus.route}</p>
@@ -239,25 +381,63 @@ export class App implements OnInit, AfterViewInit {
 
   // --- UI INTERACTION METHODS ---
 
-  // Event handler for the dropdown change
   filterByRoute(event: Event) {
     const selectElement = event.target as HTMLSelectElement;
     this.selectedRoute.set(selectElement.value);
   }
 
-  // Action when a row in the schedule table is clicked
   zoomToBus(bus: RouteSchedule) {
     if (this.map && google) {
       const position = new google.maps.LatLng(bus.currentLat, bus.currentLng);
       this.map.panTo(position);
-      this.map.setZoom(15); // Zoom in close
-      console.log(`Zoomed to bus for route: ${bus.route}`);
+      this.map.setZoom(15);
       
-      // Open the InfoWindow for the corresponding marker
       const markerIndex = this.allSchedule().findIndex(s => s.departureTime === bus.departureTime);
       if (markerIndex !== -1 && this.markers[markerIndex]) {
          google.maps.event.trigger(this.markers[markerIndex], 'click');
       }
+    }
+  }
+
+  // NEW: Booking Logic (Real Firestore Call)
+  async bookQueueSpot(bus: RouteSchedule) {
+    if (!this.isAuthReady() || this.userBooking()) return;
+
+    try {
+      const bookingId = 'active_booking'; // We only allow one active booking per user
+      const bookingRef = this.getBookingDocPath(bookingId);
+      if (!bookingRef) return;
+      
+      const newBooking: UserBooking = {
+        id: bookingId,
+        route: bus.route,
+        departureTime: bus.departureTime,
+        queuePosition: Math.floor(Math.random() * 5) + 1, // Mock queue position 1-5
+        timestamp: Date.now(),
+      };
+
+      await setDoc(bookingRef, newBooking);
+      // The onSnapshot listener will update this.userBooking() automatically
+      console.log("Queue booking saved to Firestore successfully.");
+      
+    } catch (e) {
+      console.error("Error adding document: ", e);
+    }
+  }
+
+  // NEW: Cancellation Logic (Real Firestore Call)
+  async cancelBooking() {
+    if (!this.isAuthReady() || !this.userBooking()) return;
+
+    try {
+      const bookingRef = this.getBookingDocPath('active_booking');
+      if (!bookingRef) return;
+      
+      await deleteDoc(bookingRef);
+      // The onSnapshot listener will update this.userBooking() to null automatically
+      console.log("Queue booking deleted from Firestore successfully.");
+    } catch (e) {
+      console.error("Error deleting document: ", e);
     }
   }
 }
