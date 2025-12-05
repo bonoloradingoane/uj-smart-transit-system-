@@ -1,12 +1,18 @@
-import { ChangeDetectionStrategy, Component, computed, signal, OnInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, signal, OnInit, AfterViewInit } from '@angular/core';
+
+// Declare google so TypeScript knows it exists (used by the external Google Maps library)
+declare const google: any;
 
 // 1. Define the data structure for a single bus journey
 interface RouteSchedule {
   route: string;
   source: string;
   destination: string;
-  departureTime: string; // Time the bus is scheduled to leave
-  arrivalEstimate: string; // Estimated time of arrival
+  departureTime: string;
+  arrivalEstimate: string;
+  // New: Mock coordinates for the bus's current location
+  currentLat: number; 
+  currentLng: number;
 }
 
 @Component({
@@ -19,18 +25,34 @@ interface RouteSchedule {
       <!-- Header Section -->
       <header class="mb-8 p-4 bg-white shadow-xl rounded-xl border-t-4 border-blue-600">
         <h1 class="text-3xl font-extrabold text-blue-700 tracking-tight">
-          UJ Smart Transit Schedule
+          UJ Smart Transit System
         </h1>
         <p class="text-gray-500 mt-1">
-          Phase 1: Dynamic Campus Route Schedules
+          Phase 2: Schedule Viewer and Real-Time Tracking UI
         </p>
       </header>
 
-      <!-- Main Content Area: Schedule Viewer -->
-      <main>
-        <div class="bg-white p-6 rounded-xl shadow-2xl">
+      <!-- Main Content Area: Map and Schedule side-by-side on desktop -->
+      <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        <!-- Left Column: Map Viewer (Takes 2/3 width on large screens) -->
+        <div class="lg:col-span-2 bg-white p-4 rounded-xl shadow-2xl h-[400px] lg:h-[600px]">
           <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
-            Available Campus Routes
+            Live Bus Tracking
+          </h2>
+          <!-- Map Container -->
+          <div id="map" class="w-full h-full rounded-lg bg-gray-200">
+            <!-- Loading indicator/Placeholder -->
+            <div *ngIf="!isMapLoaded()" class="flex items-center justify-center h-full text-gray-500">
+              Loading Google Map... (Requires internet connection)
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: Schedule Viewer (Takes 1/3 width on large screens) -->
+        <div class="lg:col-span-1 bg-white p-6 rounded-xl shadow-2xl">
+          <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">
+            Campus Route Schedules
           </h2>
           
           <!-- Route Selection Dropdown (Filter) -->
@@ -41,95 +63,79 @@ interface RouteSchedule {
             <select 
               id="route-select" 
               (change)="filterByRoute($event)"
-              class="mt-1 block w-full md:w-1/2 lg:w-1/3 pl-3 pr-10 py-2 text-base border-gray-300 rounded-lg shadow-md transition duration-150 ease-in-out hover:border-blue-500"
+              class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-lg shadow-md transition duration-150 ease-in-out hover:border-blue-500"
             >
               <option value="All">All Routes</option>
-              <!-- Loop through the unique routes we computed in the TypeScript class -->
+              <!-- Loop through the unique routes -->
               @for (route of availableRoutes(); track route) {
                 <option [value]="route">{{ route }}</option>
               }
             </select>
           </div>
 
-          <!-- Schedule Table: Responsive on smaller screens -->
-          <div class="overflow-x-auto border border-gray-200 rounded-lg">
-            <table class="min-w-full divide-y divide-gray-200">
-              <thead class="bg-blue-100">
+          <!-- Schedule Table (Condensed for sidebar) -->
+          <div class="overflow-y-auto max-h-[400px]">
+            <table class="min-w-full divide-y divide-gray-200 text-xs">
+              <thead class="bg-blue-100 sticky top-0">
                 <tr>
-                  <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-blue-800 uppercase tracking-wider">
-                    Route
-                  </th>
-                  <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-blue-800 uppercase tracking-wider">
-                    Source Campus
-                  </th>
-                  <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-blue-800 uppercase tracking-wider">
-                    Destination Campus
-                  </th>
-                  <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-blue-800 uppercase tracking-wider">
-                    Departure Time
-                  </th>
-                  <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-blue-800 uppercase tracking-wider">
-                    Est. Arrival
-                  </th>
+                  <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Route</th>
+                  <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Dep.</th>
+                  <th scope="col" class="px-2 py-2 text-left font-medium text-blue-800 uppercase tracking-wider">Arr.</th>
                 </tr>
               </thead>
               <tbody class="bg-white divide-y divide-gray-100">
-                <!-- Loop through the filtered list of schedules -->
                 @for (item of filteredSchedule(); track item.departureTime) {
-                  <tr class="hover:bg-blue-50 transition duration-100">
-                    <td class="px-4 py-3 whitespace-nowrap text-sm font-semibold text-gray-900">{{ item.route }}</td>
-                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{{ item.source }}</td>
-                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{{ item.destination }}</td>
-                    <td class="px-4 py-3 whitespace-nowrap text-sm text-red-600 font-mono">{{ item.departureTime }}</td>
-                    <td class="px-4 py-3 whitespace-nowrap text-sm text-green-600 font-mono">{{ item.arrivalEstimate }}</td>
+                  <tr class="hover:bg-blue-50 transition duration-100 cursor-pointer" (click)="zoomToBus(item)">
+                    <td class="px-2 py-2 font-semibold text-gray-900">{{ item.route | slice:0:10 }}...</td>
+                    <td class="px-2 py-2 text-red-600 font-mono">{{ item.departureTime }}</td>
+                    <td class="px-2 py-2 text-green-600 font-mono">{{ item.arrivalEstimate }}</td>
                   </tr>
                 } @empty {
                   <tr>
-                    <td colspan="5" class="px-4 py-4 text-center text-gray-500 italic">No schedule data available for this route.</td>
+                    <td colspan="3" class="px-2 py-4 text-center text-gray-500 italic">No schedule.</td>
                   </tr>
                 }
               </tbody>
             </table>
           </div>
+          <p class="mt-4 text-xs text-gray-500 italic">Click a schedule row to focus the map on that bus's location.</p>
         </div>
       </main>
 
       <!-- Footer Section -->
       <footer class="mt-8 text-center text-sm text-gray-400">
-        <p>UJ Smart Transit System | Angular & TypeScript Demo</p>
+        <p>UJ Smart Transit System | Angular & Google Maps Demo</p>
       </footer>
     </div>
   `,
-  // Styles are kept minimal, relying primarily on Tailwind classes in the template
+  // Styles for the map container
   styles: [`
-    /* Ensure the table cell borders look clean */
-    .divide-y th, .divide-y td {
-      border-color: #f3f4f6;
+    #map {
+      /* Map height is set in the template via Tailwind classes (h-[400px] lg:h-[600px]) */
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class App implements OnInit {
-  // 2. Data Store (Signal)
-  // This signal holds the complete mock schedule data.
+export class App implements OnInit, AfterViewInit {
+  // --- CORE STATE ---
   private allSchedule = signal<RouteSchedule[]>([
-    // Sample Routes based on UJ Campuses (APB, DFC, SWC, APK)
-    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '06:00', arrivalEstimate: '06:30' },
-    { route: 'DFC to APK Express', source: 'DFC', destination: 'APK', departureTime: '06:45', arrivalEstimate: '07:10' },
-    { route: 'SWC Commuter', source: 'SWC', destination: 'DFC', departureTime: '07:00', arrivalEstimate: '08:00' },
-    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '07:30', arrivalEstimate: '08:00' },
-    { route: 'APK to DFC Express', source: 'APK', destination: 'DFC', departureTime: '08:00', arrivalEstimate: '08:25' },
-    { route: 'SWC Commuter', source: 'DFC', destination: 'SWC', departureTime: '08:45', arrivalEstimate: '09:45' },
-    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '09:00', arrivalEstimate: '09:30' },
+    // MOCK DATA with coordinates near UJ (Johannesburg, South Africa)
+    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '06:00', arrivalEstimate: '06:30', currentLat: -26.1825, currentLng: 28.0050 }, // Near APB
+    { route: 'DFC to APK Express', source: 'DFC', destination: 'APK', departureTime: '06:45', arrivalEstimate: '07:10', currentLat: -26.1950, currentLng: 28.0100 }, // Between DFC and APK
+    { route: 'SWC Commuter', source: 'SWC', destination: 'DFC', departureTime: '07:00', arrivalEstimate: '08:00', currentLat: -26.2200, currentLng: 27.9000 }, // Moving toward Soweto
+    { route: 'APB to DFC Shuttle', source: 'APB', destination: 'DFC', departureTime: '07:30', arrivalEstimate: '08:00', currentLat: -26.1800, currentLng: 28.0150 }, // Near DFC
+    { route: 'APK to DFC Express', source: 'APK', destination: 'DFC', departureTime: '08:00', arrivalEstimate: '08:25', currentLat: -26.1700, currentLng: 28.0250 }, // Near APK
+    { route: 'SWC Commuter', source: 'DFC', destination: 'SWC', departureTime: '08:45', arrivalEstimate: '09:45', currentLat: -26.2100, currentLng: 27.9500 }, // Moving away from DFC
   ]);
-
-  // 3. State Management (Signal)
-  // This holds the user's current filter selection.
+  
   private selectedRoute = signal<string>('All');
+  isMapLoaded = signal(false);
 
-  // 4. Derived State (Computed Signal)
-  // This automatically recalculates the list displayed in the table 
-  // whenever the 'selectedRoute' or 'allSchedule' changes.
+  // --- MAP VARIABLES ---
+  private map: any;
+  private markers: any[] = [];
+  
+  // --- COMPUTED STATE (Derived Data) ---
   filteredSchedule = computed(() => {
     const filter = this.selectedRoute();
     const data = this.allSchedule();
@@ -137,28 +143,121 @@ export class App implements OnInit {
     if (filter === 'All') {
       return data;
     }
-    // Filter the list to only include items matching the selected route name
     return data.filter(item => item.route === filter);
   });
 
-  // 5. Computed Signal for Dropdown Options
-  // Extracts all unique route names from the data for the filter dropdown.
   availableRoutes = computed(() => {
     const data = this.allSchedule();
     const routes = data.map(item => item.route);
-    // Use Set to get only unique routes, and then sort them alphabetically
     return [...new Set(routes)].sort();
   });
 
+  // --- LIFECYCLE HOOKS ---
+  
   ngOnInit() {
-    // This runs when the app starts. We can use it for data loading later.
-    console.log("UJ Smart Transit System App Initialized and ready to display schedules.");
+    console.log("App starting up. Preparing Google Maps integration...");
   }
 
-  // 6. Event Handler
-  // Updates the 'selectedRoute' signal when the user changes the dropdown.
+  ngAfterViewInit() {
+    // We must load the Google Maps script after the component view is initialized
+    this.loadGoogleMapsScript();
+  }
+
+  // --- MAP METHODS ---
+
+  private loadGoogleMapsScript() {
+    // Check if the script is already loaded
+    if (document.querySelector('#google-maps-script')) {
+      this.initMap();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'google-maps-script';
+    // NOTE: This loads the Google Maps library needed for the tracking feature
+    script.src = `https://maps.googleapis.com/maps/api/js?callback=initMapPlaceholder`;
+    script.async = true;
+    script.defer = true;
+    
+    // Attach the callback function to the window object for Google Maps to call
+    (window as any).initMapPlaceholder = () => this.initMap();
+
+    document.head.appendChild(script);
+  }
+
+  private initMap() {
+    this.isMapLoaded.set(true);
+    const mapElement = document.getElementById('map');
+    
+    // Coordinates centered roughly on Johannesburg/UJ Campuses
+    const centerPoint = { lat: -26.1952, lng: 28.0435 }; 
+
+    this.map = new google.maps.Map(mapElement, {
+      center: centerPoint,
+      zoom: 12,
+      mapTypeId: 'roadmap',
+      disableDefaultUI: true, // Keep it clean for the transit app
+    });
+
+    this.addBusMarkers(this.allSchedule());
+  }
+
+  private addBusMarkers(schedule: RouteSchedule[]) {
+    // Clear old markers first
+    this.markers.forEach(marker => marker.setMap(null));
+    this.markers = [];
+
+    const iconBase = 'https://maps.google.com/mapfiles/kml/shapes/';
+    
+    schedule.forEach(bus => {
+      const marker = new google.maps.Marker({
+        position: { lat: bus.currentLat, lng: bus.currentLng },
+        map: this.map,
+        title: bus.route,
+        icon: {
+          url: iconBase + 'bus.png', // Standard bus icon
+          scaledSize: new google.maps.Size(32, 32),
+        },
+      });
+
+      // Add a simple InfoWindow when the bus marker is clicked
+      const infoWindow = new google.maps.InfoWindow({
+        content: `<div class="font-sans">
+                    <p class="font-bold text-blue-800">${bus.route}</p>
+                    <p class="text-sm">Current Status: En Route</p>
+                    <p class="text-xs text-gray-500">Next Stop: ${bus.destination}</p>
+                  </div>`,
+      });
+
+      marker.addListener('click', () => {
+        infoWindow.open(this.map, marker);
+      });
+
+      this.markers.push(marker);
+    });
+  }
+
+  // --- UI INTERACTION METHODS ---
+
+  // Event handler for the dropdown change
   filterByRoute(event: Event) {
     const selectElement = event.target as HTMLSelectElement;
     this.selectedRoute.set(selectElement.value);
+  }
+
+  // Action when a row in the schedule table is clicked
+  zoomToBus(bus: RouteSchedule) {
+    if (this.map && google) {
+      const position = new google.maps.LatLng(bus.currentLat, bus.currentLng);
+      this.map.panTo(position);
+      this.map.setZoom(15); // Zoom in close
+      console.log(`Zoomed to bus for route: ${bus.route}`);
+      
+      // Open the InfoWindow for the corresponding marker
+      const markerIndex = this.allSchedule().findIndex(s => s.departureTime === bus.departureTime);
+      if (markerIndex !== -1 && this.markers[markerIndex]) {
+         google.maps.event.trigger(this.markers[markerIndex], 'click');
+      }
+    }
   }
 }
