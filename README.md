@@ -1,31 +1,45 @@
-# 🚍 UJ Smart Transit System (UJSTS)
+# UJ Smart Transit Queue & Tracking App (Angular & Firestore)
 
-## Project Overview
+This project is a sophisticated web application built with **Angular (Standalone Components)**, **Tailwind CSS**, and **Firebase Firestore** to provide students with real-time transit information and a persistent virtual queuing system for campus shuttles.
 
-This is a proof-of-concept for a modern, digital solution designed to transform the antiquated University of Johannesburg (UJ) bus system—currently managed via static PDFs and outdated processes—into a dynamic, user-friendly smart transit application.
+## Key Features
 
-The goal is to provide UJ students and staff with a reliable, real-time, and seamless campus commuting experience, bridging the gap between old data methods and modern mobile utility.
+* **Firebase Firestore:** Implements persistent storage for user-specific virtual queue bookings.
+* **Firebase Authentication:** Handles user authentication automatically to secure private booking data.
+* **Real-Time UI:** Uses Angular Signals and Firestore's `onSnapshot` listener to ensure the queue status updates in real-time.
+* **Google Maps Integration:** Displays bus markers and allows users to zoom to specific shuttle locations.
+* **Responsive Design:** Provides an excellent user experience across mobile, tablet, and desktop devices.
+* **Virtual Queuing:** Allows users to book and cancel a single queue spot for a scheduled route.
 
-## Impressive Features (Planned)
+## Technology Stack
 
-The app is being developed in phases to implement the following features:
+* **Framework:** Angular (Standalone Component Architecture)
+* **Styling:** Tailwind CSS for rapid, utility-first styling.
+* **Mapping:** Google Maps JavaScript API for dynamic visualization.
+* **Database:** Firebase Firestore (Real-time NoSQL database)
+* **Authentication:** Firebase Auth (Custom Token/Anonymous Sign-in)
 
-| Feature | Description | Status |
+## Data Structure (Firestore)
+
+User bookings are stored securely under the authenticated user's ID:
+
+/artifacts/{appId}/users/{userId}/bookings/active_booking
+
+
+Each `active_booking` document contains:
+
+| Field | Type | Description |
 | :--- | :--- | :--- |
-| **Dynamic Schedule View** | A filterable, real-time schedule view showing routes between all campuses (APB, DFC, SWC, APK). | **IN PROGRESS (Phase 1)** |
-| **Real-Time Bus Tracking** | Displaying the live GPS location of operational shuttles on an interactive map. | **TO DO (Phase 2)** |
-| **Virtual Queue & Booking** | Ability to join a virtual queue and book a seat for high-demand routes. | **TO DO (Phase 3)** |
-| **Real-Time Alerts** | Sending push notifications for delays, unexpected cancellations, or route changes. | **TO DO (Phase 2)** |
-| **Digital Cancellation** | Simple interface for users to cancel virtual queue reservations. | **TO DO (Phase 3)** |
+| `id` | String | Static ID: 'active_booking' |
+| `route` | String | The bus route booked (e.g., 'APB to DFC Shuttle') |
+| `departureTime` | String | The scheduled departure time |
+| `queuePosition` | Number | The user's mock position in the queue (1-5) |
+| `timestamp` | Number | UNIX timestamp of the booking creation |
 
-## Current Status (Phase 1)
+## Setup and Usage
 
-We are currently setting up the application's foundational structure using Angular and focusing on building the core Schedule Viewer component.
-
-## Technologies Used
-
-* Angular (for structure and reactivity)
-* TypeScript (for robust, typed code)
-* Tailwind CSS (for a modern, responsive UI)
-* GitHub (Version Control)
-* *(Future additions: Firebase/Firestore for real-time data, Google Maps API for tracking)*
+1.  **Access:** The application runs as a single, self-contained Angular TypeScript file (`src/app.ts`).
+2.  **Authentication:** Upon loading, the app automatically initializes Firebase and authenticates the user, displaying a unique `User ID` needed for data storage.
+3.  **Booking:** Select a route from the schedule and click the **Queue** button. The booking is instantly saved to Firestore, and the status box updates.
+4.  **Persistence:** Refresh the browser or reload the app. The booking status will persist because it is loaded from the database using the `onSnapshot` listener associated with your `userId`.
+5.  **Cancellation:** Click **Cancel Booking** to delete the record from Firestore and clear your status.
